@@ -20,7 +20,8 @@ fn workflow() {
 
     let msg = InstantiateMsg {
         admin: Some(String::from("admin")),
-        token_addr: String::from("token")
+        token_addr: String::from("token"),
+        treasury: String::from("treasury")
     };
     //instantiate
     let info = mock_info("admin", &[]);

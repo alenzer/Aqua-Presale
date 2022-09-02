@@ -2,8 +2,8 @@
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-   to_binary, Addr, CosmosMsg, DepsMut, Env, MessageInfo, Response, Storage, Uint128, Uint64,
-   WasmMsg, Coin
+   to_binary, Addr, AllBalanceResponse, BankMsg, BankQuery, Coin, CosmosMsg, DepsMut, Env,
+   MessageInfo, QueryRequest, Response, Storage, Uint128, Uint64, WasmMsg,
 };
 use cw2::set_contract_version;
 use cw20::{
@@ -11,8 +11,8 @@ use cw20::{
 };
 
 use crate::error::ContractError;
-use crate::state::{CONFIG, TOTAL, USERS, VEST_PARAM, USDC_PRICE, JUNO_PRICE};
-use Interface::vesting::{ExecuteMsg, UserInfo, VestingParameter, Config, InstantiateMsg};
+use crate::state::{CONFIG, JUNO_PRICE, TOTAL, USDC_PRICE, USERS, VEST_PARAM};
+use Interface::vesting::{Config, ExecuteMsg, InstantiateMsg, UserInfo, VestingParameter};
 
 // version info for migration info
 const CONTRACT_NAME: &str = "AquaVesting";
@@ -38,12 +38,13 @@ pub fn instantiate(
       .unwrap_or(info.sender.clone());
 
    let token_addr = deps.api.addr_validate(msg.token_addr.as_str())?;
+   let treasury = deps.api.addr_validate(msg.treasury.as_str())?;
 
    CONFIG.save(
       deps.storage,
       &Config {
          owner,
-         treasury: "".to_string(),
+         treasury: treasury.to_string(),
          token_addr: token_addr.to_string(),
          start_time: Uint128::zero(),
       },
@@ -54,7 +55,7 @@ pub fn instantiate(
       &VestingParameter {
          soon: Uint128::zero(),
          after: Uint128::zero(),
-         period: Uint128::zero(),
+         period: Uint128::new(7_776_000), //0%: tge, 0: after, 3 months: priod
       },
    )?;
 
@@ -75,7 +76,10 @@ pub fn execute(
    match msg {
       ExecuteMsg::StartRelease { start_time } => try_startrelease(deps, info, start_time),
 
-      ExecuteMsg::SetPrice{ usdc_price, juno_price } => try_setprice(deps, info, usdc_price, juno_price),
+      ExecuteMsg::SetPrice {
+         usdc_price,
+         juno_price,
+      } => try_setprice(deps, info, usdc_price, juno_price),
 
       ExecuteMsg::SetConfig {
          admin,
@@ -86,7 +90,11 @@ pub fn execute(
 
       ExecuteMsg::SetVestingParameters { params } => try_setvestingparameters(deps, info, params),
 
-      ExecuteMsg::AddUser { } => try_adduser(deps, info),
+      ExecuteMsg::AddUser {} => try_adduser(deps, info),
+
+      ExecuteMsg::AddUserByOwner { wallet, amount } => {
+         try_adduser_byowner(deps, info, wallet, amount)
+      }
 
       ExecuteMsg::ClaimPendingTokens {} => try_claimpendingtokens(deps, env, info),
    }
@@ -97,13 +105,13 @@ pub fn try_startrelease(
    info: MessageInfo,
    start_time: Uint128,
 ) -> Result<Response, ContractError> {
-   let mut x = CONFIG.load(deps.storage)?;
-   if info.sender != x.owner {
+   let mut config = CONFIG.load(deps.storage)?;
+   if config.owner != info.sender && config.treasury != info.sender {
       return Err(ContractError::Unauthorized {});
    }
 
-   x.start_time = start_time;
-   CONFIG.save(deps.storage, &x)?;
+   config.start_time = start_time;
+   CONFIG.save(deps.storage, &config)?;
    Ok(Response::new().add_attribute("action", "Start Release"))
 }
 
@@ -113,7 +121,7 @@ pub fn try_setvestingparameters(
    params: VestingParameter,
 ) -> Result<Response, ContractError> {
    let config = CONFIG.load(deps.storage).unwrap();
-   if info.sender != config.owner {
+   if config.owner != info.sender && config.treasury != info.sender {
       return Err(ContractError::Unauthorized {});
    }
 
@@ -138,8 +146,8 @@ pub fn calc_pending(store: &dyn Storage, env: Env, user: &UserInfo) -> Uint128 {
    let locked = user.total_amount - unlocked;
    if past_time > vest_param.after {
       unlocked += (past_time - vest_param.after) * locked / vest_param.period;
-      if unlocked >= user.total_amount {
-         unlocked = user.total_amount;
+      if unlocked >= locked {
+         unlocked = locked;
       }
    }
 
@@ -161,11 +169,6 @@ pub fn try_claimpendingtokens(
    USERS.save(deps.storage, info.sender.clone(), &user_info)?;
 
    let config = CONFIG.load(deps.storage)?;
-   let token_info: TokenInfoResponse = deps
-      .querier
-      .query_wasm_smart(config.token_addr.clone(), &Cw20QueryMsg::TokenInfo {})?;
-   pending_amount = pending_amount * Uint128::new((10 as u128).pow(token_info.decimals as u32)); //for decimals
-
    let token_balance: Cw20BalanceResponse = deps.querier.query_wasm_smart(
       config.token_addr.clone(),
       &Cw20QueryMsg::Balance {
@@ -197,25 +200,21 @@ fn get_aqua_amount(storage: &dyn Storage, fund: &Coin) -> (bool, Uint128) {
       let usdc_price = USDC_PRICE.load(storage).unwrap();
       let amount = fund.amount.u128() * usdc_price.u128() * 100 / AQUA_PRICE / 1_000;
       return (true, Uint128::new(amount));
-   }
-   else if fund.denom == JUNO_DENOM {
+   } else if fund.denom == JUNO_DENOM {
       let juno_price = JUNO_PRICE.load(storage).unwrap();
       let amount = fund.amount.u128() * juno_price.u128() * 100 / AQUA_PRICE / 1_000;
       return (true, Uint128::new(amount));
    }
    (false, Uint128::zero())
 }
-pub fn try_adduser(
-   deps: DepsMut,
-   info: MessageInfo,
-) -> Result<Response, ContractError> {
+pub fn try_adduser(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
    if info.funds.len() == 0 {
-      return Err(ContractError::NeedFunds{});
+      return Err(ContractError::NeedFunds {});
    }
 
    let (is_support, amount) = get_aqua_amount(deps.storage, &info.funds[0]);
    if !is_support {
-      return Err(ContractError::NotSupportToken{});
+      return Err(ContractError::NotSupportToken {});
    }
 
    let mut user_info = USERS
@@ -227,14 +226,40 @@ pub fn try_adduser(
    user_info.total_amount += amount;
 
    USERS.save(deps.storage, info.sender, &user_info)?;
-   
    let mut total = TOTAL.load(deps.storage)?;
    total += amount;
    TOTAL.save(deps.storage, &total)?;
 
    Ok(Response::new().add_attribute("action", "Add  User info"))
 }
+pub fn try_adduser_byowner(
+   deps: DepsMut,
+   info: MessageInfo,
+   wallet: String,
+   amount: Uint128,
+) -> Result<Response, ContractError> {
+   //-----------check owner--------------------------
+   let config = CONFIG.load(deps.storage).unwrap();
+   if config.owner != info.sender && config.treasury != info.sender {
+      return Err(ContractError::Unauthorized {});
+   }
 
+   let address = deps.api.addr_validate(wallet.as_str()).unwrap();
+   let mut user_info = USERS
+      .may_load(deps.storage, address.clone())?
+      .unwrap_or(UserInfo {
+         total_amount: Uint128::zero(),
+         released_amount: Uint128::zero(),
+      });
+   user_info.total_amount += amount;
+
+   USERS.save(deps.storage, address, &user_info)?;
+   let mut total = TOTAL.load(deps.storage)?;
+   total += amount;
+   TOTAL.save(deps.storage, &total)?;
+
+   Ok(Response::new().add_attribute("action", "Add  User info"))
+}
 pub fn try_setconfig(
    deps: DepsMut,
    info: MessageInfo,
@@ -265,11 +290,41 @@ pub fn try_setprice(
    juno_price: Uint128,
 ) -> Result<Response, ContractError> {
    let config = CONFIG.load(deps.storage)?;
-   if config.owner != info.sender {
-      return Err(ContractError::Unauthorized{});
+   if config.owner != info.sender && config.treasury != info.sender {
+      return Err(ContractError::Unauthorized {});
    }
 
    USDC_PRICE.save(deps.storage, &usdc_price)?;
    JUNO_PRICE.save(deps.storage, &juno_price)?;
    Ok(Response::new().add_attribute("action", "SetPrice"))
+}
+
+pub fn try_withdraw(
+   deps: DepsMut,
+   env: Env,
+   info: MessageInfo,
+   wallet: String,
+) -> Result<Response, ContractError> {
+   //-----------check owner--------------------------
+   let config = CONFIG.load(deps.storage).unwrap();
+   if config.owner != info.sender && config.treasury != info.sender {
+      return Err(ContractError::Unauthorized {});
+   }
+
+   //--------get all native coins ----------------------
+   let balance: AllBalanceResponse =
+      deps
+         .querier
+         .query(&QueryRequest::Bank(BankQuery::AllBalances {
+            address: env.contract.address.to_string(),
+         }))?;
+
+   let bank_native = BankMsg::Send {
+      to_address: wallet.clone(),
+      amount: balance.amount,
+   };
+
+   Ok(Response::new()
+      .add_message(CosmosMsg::Bank(bank_native))
+      .add_attribute("action", "transfer all coins"))
 }

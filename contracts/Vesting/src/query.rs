@@ -23,6 +23,8 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
 
         QueryMsg::GetUserInfo { wallet } => to_binary(&query_getuserinfo(deps, wallet)?),
+
+        QueryMsg::GetAllInfo {} => to_binary(&query_allinfo(deps)?),
     }
 }
 fn query_pendingtokens(deps: Deps, env: Env, wallet: Addr) -> StdResult<Uint128> {
@@ -73,4 +75,17 @@ fn query_getconfig(deps: Deps) -> StdResult<Config> {
 fn query_getuserinfo(deps: Deps, wallet: Addr) -> StdResult<UserInfo> {
     let user = USERS.load(deps.storage, wallet)?;
     Ok(user)
+}
+
+fn query_allinfo(deps: Deps) -> StdResult<Vec<UserInfo>> {
+    let all: StdResult<Vec<_>> = USERS
+        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .collect();
+    let all = all.unwrap();
+
+    let mut all_userinfo: Vec<UserInfo> = Vec::new();
+    for x in all {
+        all_userinfo.push(x.1);
+    }
+    Ok(all_userinfo)
 }

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 pub struct InstantiateMsg {
     pub admin: Option<String>,
     pub token_addr: String,
+    pub treasury: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
@@ -28,6 +29,10 @@ pub enum ExecuteMsg {
         params: VestingParameter,
     },
     AddUser {},
+    AddUserByOwner{
+        wallet: String,
+        amount: Uint128,
+    },
     ClaimPendingTokens {
     },
 }
@@ -39,6 +44,7 @@ pub enum QueryMsg {
     GetPendingTokens { wallet: Addr },
     GetUserInfo { wallet: Addr },
     GetBalance { wallet: Addr },
+    GetAllInfo {},
 }
 
 //------------Config---------------------------------------
