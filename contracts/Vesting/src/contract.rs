@@ -2,410 +2,274 @@
 use cosmwasm_std::entry_point;
 
 use cosmwasm_std::{
-    to_binary, Addr, CosmosMsg, DepsMut, Env, MessageInfo, Response, Storage, Uint128, Uint64,
-    WasmMsg,
+   to_binary, Addr, CosmosMsg, DepsMut, Env, MessageInfo, Response, Storage, Uint128, Uint64,
+   WasmMsg, Coin
 };
 use cw2::set_contract_version;
 use cw20::{
-    BalanceResponse as Cw20BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, TokenInfoResponse,
+   BalanceResponse as Cw20BalanceResponse, Cw20ExecuteMsg, Cw20QueryMsg, TokenInfoResponse,
 };
 
 use crate::error::ContractError;
-use crate::state::{OWNER, PROJECT_INFOS};
-use Interface::vesting::{
-    Config, ExecuteMsg, InstantiateMsg, ProjectInfo, UserInfo, VestingParameter,
-};
+use crate::state::{CONFIG, TOTAL, USERS, VEST_PARAM, USDC_PRICE, JUNO_PRICE};
+use Interface::vesting::{ExecuteMsg, UserInfo, VestingParameter, Config, InstantiateMsg};
 
 // version info for migration info
-const CONTRACT_NAME: &str = "Vesting";
+const CONTRACT_NAME: &str = "AquaVesting";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const JUNO_DENOM: &str = "ujuno";
+const USDC_DENOM: &str = "ibc/EAC38D55372F38F1AFD68DF7FE9EF762DCF69F26520643CF3F9D292A738D8034";
+
+const AQUA_PRICE: u128 = 30; //1000
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    msg: InstantiateMsg,
+   deps: DepsMut,
+   _env: Env,
+   info: MessageInfo,
+   msg: InstantiateMsg,
 ) -> Result<Response, ContractError> {
-    set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
+   set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
-    let owner = msg
-        .admin
-        .and_then(|s| deps.api.addr_validate(s.as_str()).ok())
-        .unwrap_or(info.sender.clone());
-    OWNER.save(deps.storage, &owner)?;
+   let owner = msg
+      .admin
+      .and_then(|s| deps.api.addr_validate(s.as_str()).ok())
+      .unwrap_or(info.sender.clone());
 
-    Ok(Response::new().add_attribute("method", "instantiate"))
+   let token_addr = deps.api.addr_validate(msg.token_addr.as_str())?;
+
+   CONFIG.save(
+      deps.storage,
+      &Config {
+         owner,
+         treasury: "".to_string(),
+         token_addr: token_addr.to_string(),
+         start_time: Uint128::zero(),
+      },
+   )?;
+
+   VEST_PARAM.save(
+      deps.storage,
+      &VestingParameter {
+         soon: Uint128::zero(),
+         after: Uint128::zero(),
+         period: Uint128::zero(),
+      },
+   )?;
+
+   TOTAL.save(deps.storage, &Uint128::new(0))?;
+
+   USDC_PRICE.save(deps.storage, &Uint128::new(1000))?;
+   JUNO_PRICE.save(deps.storage, &Uint128::new(5280))?;
+   Ok(Response::new().add_attribute("method", "instantiate"))
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn execute(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    msg: ExecuteMsg,
+   deps: DepsMut,
+   env: Env,
+   info: MessageInfo,
+   msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
-    match msg {
-        ExecuteMsg::SetConfig { admin } => try_setconfig(deps, info, admin),
+   match msg {
+      ExecuteMsg::StartRelease { start_time } => try_startrelease(deps, info, start_time),
 
-        ExecuteMsg::StartRelease {
-            project_id,
-            start_time,
-        } => try_startrelease(deps, info, project_id, start_time),
+      ExecuteMsg::SetPrice{ usdc_price, juno_price } => try_setprice(deps, info, usdc_price, juno_price),
 
-        ExecuteMsg::AddProject {
-            project_id,
-            admin,
-            token_addr,
-            vesting_params,
-            start_time,
-        } => try_addproject(
-            deps,
-            info,
-            project_id,
-            admin,
-            token_addr,
-            vesting_params,
-            start_time,
-        ),
+      ExecuteMsg::SetConfig {
+         admin,
+         treasury,
+         token_addr,
+         start_time,
+      } => try_setconfig(deps, info, admin, treasury, token_addr, start_time),
 
-        ExecuteMsg::SetProjectInfo {
-            project_id,
-            project_info,
-        } => try_setprojectinfo(deps, info, project_id, project_info),
+      ExecuteMsg::SetVestingParameters { params } => try_setvestingparameters(deps, info, params),
 
-        ExecuteMsg::SetProjectConfig {
-            project_id,
-            admin,
-            token_addr,
-            start_time,
-        } => try_setprojectconfig(deps, info, project_id, admin, token_addr, start_time),
+      ExecuteMsg::AddUser { } => try_adduser(deps, info),
 
-        ExecuteMsg::SetVestingParameters { project_id, params } => {
-            try_setvestingparameters(deps, info, project_id, params)
-        }
-
-        ExecuteMsg::SetUsers {
-            project_id,
-            stage,
-            user_infos,
-        } => try_setusers(deps, info, project_id, stage, user_infos),
-
-        ExecuteMsg::AddUser {
-            project_id,
-            stage,
-            wallet,
-            amount,
-        } => try_adduser(deps, info, project_id, stage, wallet, amount),
-
-        ExecuteMsg::ClaimPendingTokens { project_id } => {
-            try_claimpendingtokens(deps, _env, info, project_id)
-        }
-    }
+      ExecuteMsg::ClaimPendingTokens {} => try_claimpendingtokens(deps, env, info),
+   }
 }
 
 pub fn try_startrelease(
-    deps: DepsMut,
-    info: MessageInfo,
-    project_id: Uint64,
-    start_time: Uint128,
+   deps: DepsMut,
+   info: MessageInfo,
+   start_time: Uint128,
 ) -> Result<Response, ContractError> {
-    let mut x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner && info.sender != x.config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
+   let mut x = CONFIG.load(deps.storage)?;
+   if info.sender != x.owner {
+      return Err(ContractError::Unauthorized {});
+   }
 
-    x.config.start_time = start_time;
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &x)?;
-    Ok(Response::new().add_attribute("action", "Start Release"))
+   x.start_time = start_time;
+   CONFIG.save(deps.storage, &x)?;
+   Ok(Response::new().add_attribute("action", "Start Release"))
 }
 
-pub fn try_setprojectinfo(
-    deps: DepsMut,
-    info: MessageInfo,
-    project_id: Uint64,
-    project_info: ProjectInfo,
-) -> Result<Response, ContractError> {
-    let mut x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner && info.sender != x.config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
-
-    x = project_info;
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &x)?;
-    Ok(Response::new().add_attribute("action", "set Project Info"))
-}
 pub fn try_setvestingparameters(
-    deps: DepsMut,
-    info: MessageInfo,
-    project_id: Uint64,
-    params: Vec<VestingParameter>,
+   deps: DepsMut,
+   info: MessageInfo,
+   params: VestingParameter,
 ) -> Result<Response, ContractError> {
-    let mut x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner && info.sender != x.config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
+   let config = CONFIG.load(deps.storage).unwrap();
+   if info.sender != config.owner {
+      return Err(ContractError::Unauthorized {});
+   }
 
-    x.vest_param = params;
-
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &x)?;
-    Ok(Response::new().add_attribute("action", "Set Vesting parameters"))
+   VEST_PARAM.save(deps.storage, &params)?;
+   Ok(Response::new().add_attribute("action", "Set Vesting parameters"))
 }
 
-pub fn calc_pending(
-    store: &dyn Storage,
-    _env: Env,
-    project_id: Uint64,
-    user: UserInfo,
-    stage: usize,
-) -> Uint128 {
-    let x = PROJECT_INFOS.load(store, project_id.u64()).unwrap();
-    if x.config.start_time == Uint128::zero() {
-        return Uint128::zero();
-    }
+pub fn calc_pending(store: &dyn Storage, env: Env, user: &UserInfo) -> Uint128 {
+   let config = CONFIG.load(store).unwrap();
+   if config.start_time == Uint128::zero() {
+      return Uint128::zero();
+   }
 
-    let param = x.vest_param[stage];
+   let vest_param = VEST_PARAM.load(store).unwrap();
 
-    let past_time = Uint128::new(_env.block.time.seconds() as u128) - x.config.start_time;
+   let past_time = Uint128::new(env.block.time.seconds() as u128) - config.start_time;
 
-    let mut unlocked = Uint128::zero();
-    if past_time > Uint128::zero() {
-        unlocked = user.total_amount * param.soon / Uint128::new(100);
-    }
-    let locked = user.total_amount - unlocked;
-    if past_time > param.after {
-        unlocked += (past_time - param.after) * locked / param.period;
-        if unlocked >= user.total_amount {
-            unlocked = user.total_amount;
-        }
-    }
+   let mut unlocked = Uint128::zero();
+   if past_time > Uint128::zero() {
+      unlocked = user.total_amount * vest_param.soon / Uint128::new(100);
+   }
+   let locked = user.total_amount - unlocked;
+   if past_time > vest_param.after {
+      unlocked += (past_time - vest_param.after) * locked / vest_param.period;
+      if unlocked >= user.total_amount {
+         unlocked = user.total_amount;
+      }
+   }
 
-    return unlocked - user.released_amount;
+   return unlocked - user.released_amount;
 }
 
 pub fn try_claimpendingtokens(
-    deps: DepsMut,
-    _env: Env,
-    info: MessageInfo,
-    project_id: Uint64,
+   deps: DepsMut,
+   env: Env,
+   info: MessageInfo,
 ) -> Result<Response, ContractError> {
-    let mut x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let mut amount = Uint128::zero();
-    for i in 0..x.users.len() - 1 {
-        let index = x.users[i]
-            .iter()
-            .position(|x| x.wallet_address == info.sender);
-        if index != None {
-            let pending_amount = calc_pending(
-                deps.storage,
-                _env.clone(),
-                project_id,
-                x.users[i][index.unwrap()].clone(),
-                i,
-            );
-            x.users[i][index.unwrap()].released_amount += pending_amount;
-            amount += pending_amount;
-        }
-    }
+   let mut user_info = USERS.load(deps.storage, info.sender.clone())?;
+   let mut pending_amount = calc_pending(deps.storage, env.clone(), &user_info);
+   if pending_amount == Uint128::zero() {
+      return Err(ContractError::NoPendingTokens {});
+   }
 
-    if amount == Uint128::zero() {
-        return Err(ContractError::NoPendingTokens {});
-    }
+   user_info.released_amount += pending_amount;
+   USERS.save(deps.storage, info.sender.clone(), &user_info)?;
 
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &x)?;
+   let config = CONFIG.load(deps.storage)?;
+   let token_info: TokenInfoResponse = deps
+      .querier
+      .query_wasm_smart(config.token_addr.clone(), &Cw20QueryMsg::TokenInfo {})?;
+   pending_amount = pending_amount * Uint128::new((10 as u128).pow(token_info.decimals as u32)); //for decimals
 
-    let token_info: TokenInfoResponse = deps
-        .querier
-        .query_wasm_smart(x.config.token_addr.clone(), &Cw20QueryMsg::TokenInfo {})?;
-    amount = amount * Uint128::new((10 as u128).pow(token_info.decimals as u32)); //for decimals
+   let token_balance: Cw20BalanceResponse = deps.querier.query_wasm_smart(
+      config.token_addr.clone(),
+      &Cw20QueryMsg::Balance {
+         address: config.treasury.clone(),
+      },
+   )?;
+   if token_balance.balance < pending_amount {
+      return Err(ContractError::NotEnoughBalance {});
+   }
 
-    let token_balance: Cw20BalanceResponse = deps.querier.query_wasm_smart(
-        x.config.token_addr.clone(),
-        &Cw20QueryMsg::Balance {
-            address: _env.contract.address.to_string(),
-        },
-    )?;
-    if token_balance.balance < amount {
-        return Err(ContractError::NotEnoughBalance {});
-    }
+   let bank_cw20 = WasmMsg::Execute {
+      contract_addr: config.token_addr,
+      msg: to_binary(&Cw20ExecuteMsg::TransferFrom {
+         owner: config.treasury,
+         recipient: info.sender.to_string(),
+         amount: pending_amount,
+      })
+      .unwrap(),
+      funds: Vec::new(),
+   };
 
-    let bank_cw20 = WasmMsg::Execute {
-        contract_addr: x.config.token_addr,
-        msg: to_binary(&Cw20ExecuteMsg::Transfer {
-            recipient: info.sender.to_string(),
-            amount: amount,
-        })
-        .unwrap(),
-        funds: Vec::new(),
-    };
-
-    Ok(Response::new()
-        .add_message(CosmosMsg::Wasm(bank_cw20))
-        .add_attribute("action", "Claim pending tokens"))
+   Ok(Response::new()
+      .add_message(CosmosMsg::Wasm(bank_cw20))
+      .add_attribute("action", "Claim pending tokens"))
 }
 
-pub fn check_add_userinfo(users: &mut Vec<UserInfo>, wallet: Addr, amount: Uint128) {
-    let index = users.iter().position(|x| x.wallet_address == wallet);
-    if index == None {
-        users.push(UserInfo {
-            wallet_address: wallet,
-            total_amount: amount,
-            released_amount: Uint128::zero(),
-            pending_amount: Uint128::zero(),
-        });
-    } else {
-        users[index.unwrap()].total_amount += amount;
-    }
+fn get_aqua_amount(storage: &dyn Storage, fund: &Coin) -> (bool, Uint128) {
+   if fund.denom == USDC_DENOM {
+      let usdc_price = USDC_PRICE.load(storage).unwrap();
+      let amount = fund.amount.u128() * usdc_price.u128() * 100 / AQUA_PRICE / 1_000;
+      return (true, Uint128::new(amount));
+   }
+   else if fund.denom == JUNO_DENOM {
+      let juno_price = JUNO_PRICE.load(storage).unwrap();
+      let amount = fund.amount.u128() * juno_price.u128() * 100 / AQUA_PRICE / 1_000;
+      return (true, Uint128::new(amount));
+   }
+   (false, Uint128::zero())
 }
 pub fn try_adduser(
-    deps: DepsMut,
-    info: MessageInfo,
-    project_id: Uint64,
-    stage: Uint128,
-    wallet: Addr,
-    amount: Uint128,
+   deps: DepsMut,
+   info: MessageInfo,
 ) -> Result<Response, ContractError> {
-    let mut x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner && info.sender != x.config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
+   if info.funds.len() == 0 {
+      return Err(ContractError::NeedFunds{});
+   }
 
-    check_add_userinfo(&mut x.users[stage.u128() as usize], wallet, amount);
-    x.total[stage.u128() as usize] += amount;
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &x)?;
+   let (is_support, amount) = get_aqua_amount(deps.storage, &info.funds[0]);
+   if !is_support {
+      return Err(ContractError::NotSupportToken{});
+   }
 
-    Ok(Response::new().add_attribute("action", "Add  User info"))
+   let mut user_info = USERS
+      .may_load(deps.storage, info.sender.clone())?
+      .unwrap_or(UserInfo {
+         total_amount: Uint128::zero(),
+         released_amount: Uint128::zero(),
+      });
+   user_info.total_amount += amount;
+
+   USERS.save(deps.storage, info.sender, &user_info)?;
+   
+   let mut total = TOTAL.load(deps.storage)?;
+   total += amount;
+   TOTAL.save(deps.storage, &total)?;
+
+   Ok(Response::new().add_attribute("action", "Add  User info"))
 }
 
-pub fn try_setusers(
-    deps: DepsMut,
-    info: MessageInfo,
-    project_id: Uint64,
-    stage: Uint128,
-    user_infos: Vec<UserInfo>,
-) -> Result<Response, ContractError> {
-    let mut x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner && info.sender != x.config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
-
-    x.users[stage.u128() as usize] = user_infos;
-
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &x)?;
-
-    Ok(Response::new().add_attribute("action", "Set User infos for Seed stage"))
-}
-
-pub fn try_setprojectconfig(
-    deps: DepsMut,
-    info: MessageInfo,
-    project_id: Uint64,
-    admin: String,
-    token_addr: String,
-    start_time: Uint128,
-) -> Result<Response, ContractError> {
-    //-----------check owner--------------------------
-    let mut x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner && info.sender != x.config.owner {
-        return Err(ContractError::Unauthorized {});
-    }
-
-    x.config.owner = deps.api.addr_validate(admin.as_str())?;
-    x.config.token_addr = token_addr;
-    x.config.start_time = start_time;
-
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &x)?;
-    Ok(Response::new().add_attribute("action", "SetConfig"))
-}
-
-pub fn try_addproject(
-    deps: DepsMut,
-    info: MessageInfo,
-    project_id: Uint64,
-    admin: String,
-    token_addr: String,
-    vesting_params: Vec<VestingParameter>,
-    start_time: Uint128,
-) -> Result<Response, ContractError> {
-    //-----------check owner--------------------------
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner {
-        return Err(ContractError::Unauthorized {});
-    }
-
-    let config: Config = Config {
-        owner: deps.api.addr_validate(admin.as_str())?,
-        token_addr: token_addr,
-        start_time: start_time,
-    };
-
-    let mut _vesting_params = vesting_params;
-    if _vesting_params.len() == 0 {
-        let sec_per_month = 60 * 60 * 24 * 30;
-        let seed_param = VestingParameter {
-            soon: Uint128::new(15),                  //15% unlock at tge
-            after: Uint128::new(sec_per_month),      //after 1 month
-            period: Uint128::new(sec_per_month * 6), //release over 6 month
-        };
-        let presale_param = VestingParameter {
-            soon: Uint128::new(20),                  //20% unlock at tge
-            after: Uint128::new(sec_per_month),      //ater 1 month
-            period: Uint128::new(sec_per_month * 5), //release over 5 month
-        };
-        let ido_param = VestingParameter {
-            soon: Uint128::new(25),                  //25% unlock at tge
-            after: Uint128::new(sec_per_month),      //after 1 month
-            period: Uint128::new(sec_per_month * 4), //release over 4 month
-        };
-        _vesting_params = vec![seed_param, presale_param, ido_param];
-    }
-
-    let _project_info = PROJECT_INFOS.may_load(deps.storage, project_id.u64())?;
-    let mut users = Vec::new();
-    let mut total = Vec::new();
-
-    if _project_info != None {
-        let _project_info = _project_info.unwrap();
-        users = _project_info.users;
-        total = _project_info.total;
-    } else {
-        for _ in _vesting_params.clone() {
-            users.push(Vec::new());
-            total.push(Uint128::zero())
-        }
-    }
-
-    let project_info: ProjectInfo = ProjectInfo {
-        project_id: project_id,
-        config: config,
-        vest_param: _vesting_params,
-        users: users,
-        total: total,
-    };
-
-    PROJECT_INFOS.save(deps.storage, project_id.u64(), &project_info)?;
-
-    Ok(Response::new().add_attribute("action", "add project"))
-}
 pub fn try_setconfig(
-    deps: DepsMut,
-    info: MessageInfo,
-    admin: String,
+   deps: DepsMut,
+   info: MessageInfo,
+   admin: String,
+   treasury: String,
+   token_addr: String,
+   start_time: Uint128,
 ) -> Result<Response, ContractError> {
-    // //-----------check owner--------------------------
-    let owner = OWNER.load(deps.storage).unwrap();
-    if info.sender != owner {
-        return Err(ContractError::Unauthorized {});
-    }
+   //-----------check owner--------------------------
+   let mut config = CONFIG.load(deps.storage).unwrap();
+   if info.sender != config.owner {
+      return Err(ContractError::Unauthorized {});
+   }
 
-    let admin_addr = deps.api.addr_validate(&admin).unwrap();
-    OWNER.save(deps.storage, &admin_addr)?;
+   config.owner = deps.api.addr_validate(admin.as_str())?;
+   config.treasury = treasury;
+   config.token_addr = token_addr;
+   config.start_time = start_time;
 
-    Ok(Response::new().add_attribute("action", "SetConfig"))
+   CONFIG.save(deps.storage, &config)?;
+   Ok(Response::new().add_attribute("action", "SetConfig"))
+}
+
+pub fn try_setprice(
+   deps: DepsMut,
+   info: MessageInfo,
+   usdc_price: Uint128,
+   juno_price: Uint128,
+) -> Result<Response, ContractError> {
+   let config = CONFIG.load(deps.storage)?;
+   if config.owner != info.sender {
+      return Err(ContractError::Unauthorized{});
+   }
+
+   USDC_PRICE.save(deps.storage, &usdc_price)?;
+   JUNO_PRICE.save(deps.storage, &juno_price)?;
+   Ok(Response::new().add_attribute("action", "SetPrice"))
 }

@@ -10,6 +10,12 @@ pub enum ContractError {
     #[error("Unauthorized")]
     Unauthorized {},
 
+    #[error("Should call with Funds")]
+    NeedFunds {},
+
+    #[error("Not Support Token")]
+    NotSupportToken{},
+
     #[error("There is no pending tokens")]
     NoPendingTokens {},
 

@@ -1,136 +1,76 @@
 #[cfg(not(feature = "library"))]
 use cosmwasm_std::entry_point;
 use cosmwasm_std::{
-    to_binary, AllBalanceResponse, BankQuery, Binary, Coin, Deps, Env, QueryRequest, StdResult,
-    Uint128, Uint64
+    to_binary, Addr, AllBalanceResponse, BankQuery, Binary, Coin, Deps, Env, QueryRequest,
+    StdResult, Uint128, Uint64,
 };
 
 use cw20::{BalanceResponse as Cw20BalanceResponse, Cw20QueryMsg, TokenInfoResponse};
 
 use crate::contract::calc_pending;
-use crate::state::{OWNER, PROJECT_INFOS};
-use Interface::vesting::{Config, ProjectInfo, QueryMsg, UserInfo};
+use crate::state::{CONFIG, TOTAL, USERS, VEST_PARAM};
+use Interface::vesting::{Config, QueryMsg, UserInfo};
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
-        QueryMsg::GetBalance { project_id, wallet } => {
-            to_binary(&query_balance(deps, _env, project_id, wallet)?)
+        QueryMsg::GetBalance { wallet } => to_binary(&query_balance(deps, env, wallet)?),
+
+        QueryMsg::GetConfig {} => to_binary(&query_getconfig(deps)?),
+
+        QueryMsg::GetPendingTokens { wallet } => {
+            to_binary(&query_pendingtokens(deps, env, wallet)?)
         }
 
-        QueryMsg::GetConfig { project_id } => to_binary(&query_getconfig(deps, project_id)?),
-
-        QueryMsg::GetProjectInfo { project_id } => {
-            to_binary(&query_getprojectinfo(deps, project_id)?)
-        }
-
-        QueryMsg::GetPendingTokens { project_id, wallet } => {
-            to_binary(&query_pendingtokens(deps, _env, project_id, wallet)?)
-        }
-
-        QueryMsg::GetAllProjectInfo {} => to_binary(&query_getallprojectinfo(deps)?),
-
-        QueryMsg::GetOwner {} => {
-            let owner = OWNER.load(deps.storage).unwrap();
-            to_binary(&owner)
-        }
-
-        QueryMsg::GetUserInfo { project_id, wallet } => {
-            to_binary(&query_getuserinfo(deps, project_id, wallet)?)
-        }
+        QueryMsg::GetUserInfo { wallet } => to_binary(&query_getuserinfo(deps, wallet)?),
     }
 }
-fn query_pendingtokens(
-    deps: Deps,
-    _env: Env,
-    project_id: Uint64,
-    wallet: String,
-) -> StdResult<Uint128> {
-    let x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
+fn query_pendingtokens(deps: Deps, env: Env, wallet: Addr) -> StdResult<Uint128> {
+    let user_info = USERS.load(deps.storage, wallet)?;
 
-    let mut amount = Uint128::zero();
-    for i in 0..x.users.len() - 1 {
-        let index = x.users[i].iter().position(|x| x.wallet_address == wallet);
-        if index != None {
-            let pending_amount = calc_pending(
-                deps.storage,
-                _env.clone(),
-                project_id,
-                x.users[i][index.unwrap()].clone(),
-                i,
-            );
-            amount += pending_amount;
-        }
-    }
+    let pending_amount = calc_pending(
+        deps.storage,
+        env.clone(),
+        &user_info,
+    );
 
-    Ok(amount)
-}
-fn query_getprojectinfo(deps: Deps, project_id: Uint64) -> StdResult<ProjectInfo> {
-    let x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    Ok(x)
+    Ok(pending_amount)
 }
 
 fn query_balance(
     deps: Deps,
     _env: Env,
-    project_id: Uint64,
-    wallet: String,
+    wallet: Addr,
 ) -> StdResult<AllBalanceResponse> {
     // let uusd_denom = String::from("uusd");
     let mut balance: AllBalanceResponse =
         deps.querier
             .query(&QueryRequest::Bank(BankQuery::AllBalances {
-                address: wallet.clone(),
+                address: wallet.to_string(),
             }))?;
 
-    let x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
+    let config = CONFIG.load(deps.storage)?;
 
     let token_balance: Cw20BalanceResponse = deps.querier.query_wasm_smart(
-        x.clone().config.token_addr,
-        &Cw20QueryMsg::Balance { address: wallet },
+        config.token_addr.clone(),
+        &Cw20QueryMsg::Balance { address: wallet.to_string() },
     )?;
     let token_info: TokenInfoResponse = deps
         .querier
-        .query_wasm_smart(x.config.token_addr.clone(), &Cw20QueryMsg::TokenInfo {})?;
+        .query_wasm_smart(config.token_addr, &Cw20QueryMsg::TokenInfo {})?;
     balance
         .amount
         .push(Coin::new(token_balance.balance.u128(), token_info.name));
 
     Ok(balance)
 }
-fn query_getconfig(deps: Deps, project_id: Uint64) -> StdResult<Config> {
-    let x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    Ok(x.config)
-}
-fn query_getallprojectinfo(deps: Deps) -> StdResult<Vec<ProjectInfo>> {
-    let all: StdResult<Vec<_>> = PROJECT_INFOS
-        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
-        .collect();
-    let all = all.unwrap();
 
-    let mut all_project: Vec<ProjectInfo> = Vec::new();
-    for x in all {
-        all_project.push(x.1);
-    }
-    Ok(all_project)
+fn query_getconfig(deps: Deps) -> StdResult<Config> {
+    let x = CONFIG.load(deps.storage)?;
+    Ok(x)
 }
 
-fn query_getuserinfo(deps: Deps, project_id: Uint64, wallet: String) -> StdResult<UserInfo> {
-    let x = PROJECT_INFOS.load(deps.storage, project_id.u64())?;
-    let mut user_info: UserInfo = UserInfo {
-        total_amount: Uint128::zero(),
-        released_amount: Uint128::zero(),
-        wallet_address: deps.api.addr_validate(&wallet).unwrap(),
-        pending_amount: Uint128::zero(),
-    };
-
-    for i in 0..x.users.len() - 1 {
-        let index = x.users[i].iter().position(|x| x.wallet_address == wallet);
-        if index != None {
-            user_info.total_amount += x.users[i][index.unwrap()].total_amount;
-            user_info.released_amount += x.users[i][index.unwrap()].released_amount;
-        }
-    }
-
-    Ok(user_info)
+fn query_getuserinfo(deps: Deps, wallet: Addr) -> StdResult<UserInfo> {
+    let user = USERS.load(deps.storage, wallet)?;
+    Ok(user)
 }
