@@ -18,7 +18,7 @@ use Interface::vesting::{Config, ExecuteMsg, InstantiateMsg, UserInfo, VestingPa
 const CONTRACT_NAME: &str = "AquaVesting";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const JUNO_DENOM: &str = "ujuno";
+const JUNO_DENOM: &str = "ujunox";
 const USDC_DENOM: &str = "ibc/EAC38D55372F38F1AFD68DF7FE9EF762DCF69F26520643CF3F9D292A738D8034";
 
 const AQUA_PRICE: u128 = 30; //1000
@@ -97,6 +97,8 @@ pub fn execute(
       }
 
       ExecuteMsg::ClaimPendingTokens {} => try_claimpendingtokens(deps, env, info),
+
+      ExecuteMsg::Withdraw { wallet } => try_withdraw(deps, env, info, wallet),
    }
 }
 
@@ -198,11 +200,11 @@ pub fn try_claimpendingtokens(
 fn get_aqua_amount(storage: &dyn Storage, fund: &Coin) -> (bool, Uint128) {
    if fund.denom == USDC_DENOM {
       let usdc_price = USDC_PRICE.load(storage).unwrap();
-      let amount = fund.amount.u128() * usdc_price.u128() * 100 / AQUA_PRICE / 1_000;
+      let amount = fund.amount.u128() * usdc_price.u128() * 1_000 / AQUA_PRICE / 1_000;
       return (true, Uint128::new(amount));
    } else if fund.denom == JUNO_DENOM {
       let juno_price = JUNO_PRICE.load(storage).unwrap();
-      let amount = fund.amount.u128() * juno_price.u128() * 100 / AQUA_PRICE / 1_000;
+      let amount = fund.amount.u128() * juno_price.u128() * 1_000 / AQUA_PRICE / 1_000;
       return (true, Uint128::new(amount));
    }
    (false, Uint128::zero())

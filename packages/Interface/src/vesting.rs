@@ -34,6 +34,9 @@ pub enum ExecuteMsg {
         amount: Uint128,
     },
     ClaimPendingTokens {},
+    Withdraw {
+        wallet: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
