@@ -29,22 +29,22 @@ pub enum ExecuteMsg {
         params: VestingParameter,
     },
     AddUser {},
-    AddUserByOwner{
+    AddUserByOwner {
         wallet: String,
         amount: Uint128,
     },
-    ClaimPendingTokens {
-    },
+    ClaimPendingTokens {},
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryMsg {
-    GetConfig { },
+    GetConfig {},
     GetPendingTokens { wallet: Addr },
     GetUserInfo { wallet: Addr },
     GetBalance { wallet: Addr },
     GetAllInfo {},
+    GetPrice {},
 }
 
 //------------Config---------------------------------------
@@ -67,6 +67,6 @@ pub struct VestingParameter {
 //-------------Token holder-------------------------------------------
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct UserInfo {
-    pub total_amount: Uint128,    //WFD token total amount that the investor buys.
+    pub total_amount: Uint128, //WFD token total amount that the investor buys.
     pub released_amount: Uint128, //released WFD token amount of totalAmount
 }
